@@ -77,9 +77,50 @@ impl MerkleTree {
         }
     }
 
+    /// Create a proof for a leaf node
+    /// The proof is a list of hashes that can be used to verify the inclusion of the leaf in the tree
+    /// Returns a list of (hash, is_left) pairs, where hash is the hash of the sibling of the node on the path to the root
+    pub fn create_proof(&self, offset: usize) -> Vec<([u8; 32], bool)> {
+        let mut proof = Vec::new();
+        let mut current_offset = offset;
+        let mut current_layer = self.depth - 1;
+        while current_layer > 0 {
+            let sibling_offset = if current_offset % 2 == 0 {
+                current_offset + 1
+            } else {
+                current_offset - 1
+            };
+            let sibling_index = Self::index(current_layer, sibling_offset);
+            let sibling_hash = self.nodes[sibling_index];
+            proof.push((sibling_hash, current_offset % 2 == 0));
+            current_offset /= 2;
+            current_layer -= 1;
+        }
+        proof
+    }
+
+    /// Verify a proof for a leaf node
+    /// The proof is a list of hashes that can be used to verify the inclusion of the leaf in the tree
+    pub fn verify_proof(&self, value: &[u8; 32], proof: &[([u8; 32], bool)]) -> [u8; 32] {
+        let mut current_value = value.clone();
+        for (hash, is_left) in proof {
+            let mut hasher = Sha3_256::new();
+            if *is_left {
+                hasher.update(&current_value);
+                hasher.update(hash);
+            } else {
+                hasher.update(hash);
+                hasher.update(&current_value);
+            }
+            current_value = hasher.finalize().into();
+        }
+        current_value
+    }
+
     /// returns the index of a node given its depth and offset
     /// depth is the level of the node in the tree
     /// offset is the position of the node in the level
+    /// 
     fn index(depth: usize, offset: usize) -> usize {
         Self::nodes_in_tree(depth) + offset
     }
@@ -305,4 +346,88 @@ mod tests {
                 .as_slice()
         );
     }
+
+    #[test]
+    fn test_create_proof_with_demo_values_from_exercise() {
+        // From the exercise:
+        // initial_leaf = 0x0000000000000000000000000000000000000000000000000000000000000000
+        // tree = MerkleTree::new(depth = 5, initial_leaf = initial_leaf)
+        // for i in 0..tree.num_leaves():
+        // tree.set(i, i * 0x1111111111111111111111111111111111111111111111111111111111111111)
+        // assert tree.root() == 0x57054e43fa56333fd51343b09460d48b9204999c376624f52480c5593b91eff4
+        // assert tree.proof(3) == [
+        // right, sibling = 0x2222222222222222222222222222222222222222222222222222222222222222
+        // right, sibling = 0x35e794f1b42c224a8e390ce37e141a8d74aa53e151c1d1b9a03f88c65adb9e10
+        // left, sibling = 0x26fca7737f48fa702664c8b468e34c858e62f51762386bd0bddaa7050e0dd7c0
+        // left, sibling = 0xe7e11a86a0c1d8d8624b1629cb58e39bb4d0364cb8cb33c4029662ab30336858
+        // ]
+        let initial_value = [0x00; 32];
+        let mut tree = MerkleTree::new(5, &initial_value);
+        for i in 0..tree.num_leaves() {
+            let updated_value = [(i * 0x11) as u8; 32];
+            tree.set(i, &updated_value);
+        }
+        let proof = tree.create_proof(3);
+        assert_eq!(
+            proof,
+            vec![
+                (
+                    hex::decode("2222222222222222222222222222222222222222222222222222222222222222")
+                        .unwrap()
+                        .as_slice()
+                        .try_into()
+                        .unwrap(),
+                    false
+                ),
+                (
+                    hex::decode("35e794f1b42c224a8e390ce37e141a8d74aa53e151c1d1b9a03f88c65adb9e10")
+                        .unwrap()
+                        .as_slice()
+                        .try_into()
+                        .unwrap(),
+                    false
+                ),
+                (
+                    hex::decode("26fca7737f48fa702664c8b468e34c858e62f51762386bd0bddaa7050e0dd7c0")
+                        .unwrap()
+                        .as_slice()
+                        .try_into()
+                        .unwrap(),
+                    true
+                ),
+                (
+                    hex::decode("e7e11a86a0c1d8d8624b1629cb58e39bb4d0364cb8cb33c4029662ab30336858")
+                        .unwrap()
+                        .as_slice()
+                        .try_into()
+                        .unwrap(),
+                    true
+                ),
+            ]);
+    }
+
+    #[test]
+    fn test_verify_proof_with_demo_values_from_exercise() {
+        // From the exercise:
+        // initial_leaf = 0x0000000000000000000000000000000000000000000000000000000000000000
+        // tree = MerkleTree::new(depth = 5, initial_leaf = initial_leaf)
+        // for i in 0..tree.num_leaves():
+        // tree.set(i, i * 0x1111111111111111111111111111111111111111111111111111111111111111)
+        // leaf_5 = 5 * 0x1111111111111111111111111111111111111111111111111111111111111111
+        // root = tree.root()
+        // proof = tree.proof(3)
+        // assert verify(proof, leaf_5) == root
+        let initial_value = [0x00; 32];
+        let mut tree = MerkleTree::new(5, &initial_value);
+        for i in 0..tree.num_leaves() {
+            let updated_value = [(i * 0x11) as u8; 32];
+            tree.set(i, &updated_value);
+        }
+        let leaf_5 = [5 * 0x11 as u8; 32];
+        let root = tree.root_hash();
+        let proof = tree.create_proof(5);
+        assert_eq!(&tree.verify_proof(&leaf_5, &proof), root);
+
+    }
+
 }
