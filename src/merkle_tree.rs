@@ -1,43 +1,46 @@
 use std::fmt::Debug;
 
-use sha3::{Digest, Sha3_256};
+use digest::{Digest, Output};
 
 /// A simple Merkle tree implementation
-pub struct MerkleTree {
+pub struct MerkleTree<D: Digest> {
     /// depth of the tree
     depth: usize,
     /// nodes of the tree in breadth-first traversal order
-    nodes: Vec<[u8; 32]>,
+    nodes: Vec<Output<D>>,
 }
 
-impl MerkleTree {
-
+impl<D> MerkleTree<D>
+where
+    D: Digest + Default + Clone + Debug,
+    Output<D>: Copy, // big performance hit if not Copy
+{
     /// creates a new Merkle tree with the given depth and initial value for the leaves
-    pub fn new(depth: usize, initial_value: &[u8; 32]) -> Self {
+    pub fn new(depth: usize, initial_value: &Output<D>) -> Self {
         // panic if depth < 1
         if depth < 1 {
             panic!("Merkle tree depth must be at least 1");
         }
 
         let mut nodes = vec![initial_value.to_owned(); Self::nodes_in_tree(depth)];
-        
+
         // update all the hashes of the intermediate layers. Note that all hashes within one layer are the same
         for d in (0..depth - 1).rev() {
             // compute hash of (d, 0)
-            let mut hasher = Sha3_256::new();
-            hasher.update(&nodes[Self::first_child_index(d, 0)]);
-            hasher.update(&nodes[Self::second_child_index(d, 0)]);
+            let mut hasher = D::new();
+            hasher.update(nodes[Self::first_child_index(d, 0)]);
+            hasher.update(nodes[Self::second_child_index(d, 0)]);
             let hash = hasher.finalize();
             // set all nodes in the layer to the same hash
             for i in 0..(1 << d) {
-                nodes[Self::index(d, i)] = hash.into();
+                nodes[Self::index(d, i)] = hash;
             }
         }
         Self { depth, nodes }
     }
 
     /// returns the root hash of the tree
-    pub fn root_hash(&self) -> &[u8; 32] {
+    pub fn root_hash(&self) -> &Output<D> {
         &self.nodes[0]
     }
 
@@ -47,7 +50,7 @@ impl MerkleTree {
     }
 
     /// updates the value of a leaf node
-    pub fn set(&mut self, offset: usize, value: &[u8; 32]) {
+    pub fn set(&mut self, offset: usize, value: &Output<D>) {
         // find index of the node to update and set the new value
         let index = Self::index(self.depth - 1, offset);
         self.nodes[index] = value.to_owned();
@@ -58,13 +61,13 @@ impl MerkleTree {
             Self::depth_offset(Self::parent_index(self.depth - 1, offset));
         loop {
             // compute new hash
-            let mut hasher = Sha3_256::new();
-            hasher.update(&self.nodes[Self::first_child_index(parent_layer, parent_offset)]);
-            hasher.update(&self.nodes[Self::second_child_index(parent_layer, parent_offset)]);
+            let mut hasher = D::new();
+            hasher.update(self.nodes[Self::first_child_index(parent_layer, parent_offset)]);
+            hasher.update(self.nodes[Self::second_child_index(parent_layer, parent_offset)]);
             let hash = hasher.finalize();
 
             // set the new hash
-            self.nodes[Self::index(parent_layer, parent_offset)] = hash.into();
+            self.nodes[Self::index(parent_layer, parent_offset)] = hash;
 
             // check if we reached the root
             if parent_layer == 0 {
@@ -72,7 +75,7 @@ impl MerkleTree {
             }
 
             // move to the parent of the current node
-            parent_offset = parent_offset / 2;
+            parent_offset /= 2;
             parent_layer -= 1;
         }
     }
@@ -80,7 +83,7 @@ impl MerkleTree {
     /// Create a proof for a leaf node
     /// The proof is a list of hashes that can be used to verify the inclusion of the leaf in the tree
     /// Returns a list of (hash, is_left) pairs, where hash is the hash of the sibling of the node on the path to the root
-    pub fn create_proof(&self, offset: usize) -> Vec<([u8; 32], bool)> {
+    pub fn create_proof(&self, offset: usize) -> Vec<(Output<D>, bool)> {
         let mut proof = Vec::new();
         let mut current_offset = offset;
         let mut current_layer = self.depth - 1;
@@ -101,18 +104,18 @@ impl MerkleTree {
 
     /// Verify a proof for a leaf node
     /// The proof is a list of hashes that can be used to verify the inclusion of the leaf in the tree
-    pub fn verify_proof(&self, value: &[u8; 32], proof: &[([u8; 32], bool)]) -> [u8; 32] {
-        let mut current_value = value.clone();
+    pub fn verify_proof(&self, value: &Output<D>, proof: &[(Output<D>, bool)]) -> Output<D> {
+        let mut current_value = *value;
         for (hash, is_left) in proof {
-            let mut hasher = Sha3_256::new();
+            let mut hasher = D::new();
             if *is_left {
-                hasher.update(&current_value);
+                hasher.update(current_value);
                 hasher.update(hash);
             } else {
                 hasher.update(hash);
-                hasher.update(&current_value);
+                hasher.update(current_value);
             }
-            current_value = hasher.finalize().into();
+            current_value = hasher.finalize();
         }
         current_value
     }
@@ -120,7 +123,7 @@ impl MerkleTree {
     /// returns the index of a node given its depth and offset
     /// depth is the level of the node in the tree
     /// offset is the position of the node in the level
-    /// 
+    ///
     fn index(depth: usize, offset: usize) -> usize {
         Self::nodes_in_tree(depth) + offset
     }
@@ -166,6 +169,10 @@ impl MerkleTree {
 mod tests {
     use super::*;
 
+    use sha3::Sha3_256;
+
+    type MerkleTree = super::MerkleTree<Sha3_256>;
+
     #[test]
     fn test_log2() {
         assert_eq!(MerkleTree::log2(0), 0);
@@ -189,13 +196,13 @@ mod tests {
 
     #[test]
     fn test_num_leaves() {
-        let tree = MerkleTree::new(1, &[0u8; 32]);
+        let tree = MerkleTree::new(1, &[0u8; 32].into());
         assert_eq!(tree.num_leaves(), 1);
-        let tree = MerkleTree::new(2, &[0u8; 32]);
+        let tree = MerkleTree::new(2, &[0u8; 32].into());
         assert_eq!(tree.num_leaves(), 2);
-        let tree = MerkleTree::new(3, &[0u8; 32]);
+        let tree = MerkleTree::new(3, &[0u8; 32].into());
         assert_eq!(tree.num_leaves(), 4);
-        let tree = MerkleTree::new(4, &[0u8; 32]);
+        let tree = MerkleTree::new(4, &[0u8; 32].into());
         assert_eq!(tree.num_leaves(), 8);
     }
 
@@ -244,7 +251,7 @@ mod tests {
 
     #[test]
     fn test_merkle_tree() {
-        let initial_value = [0u8; 32];
+        let initial_value = [0u8; 32].into();
         let tree = MerkleTree::new(3, &initial_value);
 
         // check leaves
@@ -255,26 +262,26 @@ mod tests {
 
         // check layer 2
         let mut hasher = Sha3_256::new();
-        hasher.update(&initial_value);
-        hasher.update(&initial_value);
+        hasher.update(initial_value);
+        hasher.update(initial_value);
         let hash = hasher.finalize();
-        assert_eq!(tree.nodes[1], hash.as_slice());
-        assert_eq!(tree.nodes[2], hash.as_slice());
+        assert_eq!(tree.nodes[1], hash);
+        assert_eq!(tree.nodes[2], hash);
 
         // check root
         let mut hasher = Sha3_256::new();
-        hasher.update(&hash);
-        hasher.update(&hash);
+        hasher.update(hash);
+        hasher.update(hash);
         let root = hasher.finalize();
-        assert_eq!(tree.nodes[0], root.as_slice());
+        assert_eq!(tree.nodes[0], root);
     }
 
     #[test]
     fn test_set() {
-        let initial_value = [0u8; 32];
+        let initial_value = [0u8; 32].into();
         let mut tree = MerkleTree::new(3, &initial_value);
 
-        let new_value = [1u8; 32];
+        let new_value = [1u8; 32].into();
         tree.set(0, &new_value);
 
         // check leaves
@@ -285,23 +292,23 @@ mod tests {
 
         // check layer 2
         let mut hasher = Sha3_256::new();
-        hasher.update(&new_value);
-        hasher.update(&initial_value);
+        hasher.update(new_value);
+        hasher.update(initial_value);
         let hash_index_1 = hasher.finalize();
-        assert_eq!(tree.nodes[1], hash_index_1.as_slice());
+        assert_eq!(tree.nodes[1], hash_index_1);
 
         let mut hasher = Sha3_256::new();
-        hasher.update(&initial_value);
-        hasher.update(&initial_value);
+        hasher.update(initial_value);
+        hasher.update(initial_value);
         let hash_index_2 = hasher.finalize();
-        assert_eq!(tree.nodes[2], hash_index_2.as_slice());
+        assert_eq!(tree.nodes[2], hash_index_2);
 
         // check root
         let mut hasher = Sha3_256::new();
-        hasher.update(&hash_index_1);
-        hasher.update(&hash_index_2);
+        hasher.update(hash_index_1);
+        hasher.update(hash_index_2);
         let root = hasher.finalize();
-        assert_eq!(tree.nodes[0], root.as_slice());
+        assert_eq!(tree.nodes[0], root);
     }
 
     #[test]
@@ -312,18 +319,19 @@ mod tests {
         // for i in 0..tree.num_leaves():
         //   tree.set(i, i * 0x1111111111111111111111111111111111111111111111111111111111111111)
         // assert tree.root() == 0x57054e43fa56333fd51343b09460d48b9204999c376624f52480c5593b91eff4
-        let initial_value = [0x00; 32];
+        let initial_value = [0x00; 32].into();
         let mut tree = MerkleTree::new(5, &initial_value);
         for i in 0..tree.num_leaves() {
-            let updated_value = [(i * 0x11) as u8; 32];
+            let updated_value = [(i * 0x11) as u8; 32].into();
             tree.set(i, &updated_value);
         }
-        assert_eq!(
-            tree.root_hash(),
+        let expected =
             hex::decode("57054e43fa56333fd51343b09460d48b9204999c376624f52480c5593b91eff4")
                 .unwrap()
                 .as_slice()
-        );
+                .to_owned();
+        let expected = digest::Output::<Sha3_256>::clone_from_slice(&expected);
+        assert_eq!(tree.root_hash(), &expected);
     }
 
     #[test]
@@ -334,17 +342,16 @@ mod tests {
         // assert tree.root() == 0xd4490f4d374ca8a44685fe9471c5b8dbe58cdffd13d30d9aba15dd29efb92930
         let initial_value =
             hex::decode("abababababababababababababababababababababababababababababababab")
-                .unwrap()
-                .as_slice()
-                .try_into()
                 .unwrap();
-        let tree = MerkleTree::new(20, &initial_value);
-        assert_eq!(
-            tree.root_hash(),
+
+        let tree = MerkleTree::new(20, initial_value.as_slice().into());
+        let expected =
             hex::decode("d4490f4d374ca8a44685fe9471c5b8dbe58cdffd13d30d9aba15dd29efb92930")
                 .unwrap()
                 .as_slice()
-        );
+                .to_owned();
+        let expected = digest::Output::<Sha3_256>::clone_from_slice(&expected);
+        assert_eq!(tree.root_hash(), &expected);
     }
 
     #[test]
@@ -361,49 +368,48 @@ mod tests {
         // left, sibling = 0x26fca7737f48fa702664c8b468e34c858e62f51762386bd0bddaa7050e0dd7c0
         // left, sibling = 0xe7e11a86a0c1d8d8624b1629cb58e39bb4d0364cb8cb33c4029662ab30336858
         // ]
-        let initial_value = [0x00; 32];
-        let mut tree = MerkleTree::new(5, &initial_value);
+        let initial_value: &[u8] = [0x00; 32].as_slice();
+        let mut tree = MerkleTree::new(5, initial_value.into());
         for i in 0..tree.num_leaves() {
             let updated_value = [(i * 0x11) as u8; 32];
-            tree.set(i, &updated_value);
+            tree.set(i, &updated_value.into());
         }
         let proof = tree.create_proof(3);
+
+        let decode_string = |s: &str| {
+            let bs: [u8; 32] = hex::decode(s).unwrap().as_slice().try_into().unwrap();
+            bs.into()
+        };
+
         assert_eq!(
             proof,
             vec![
                 (
-                    hex::decode("2222222222222222222222222222222222222222222222222222222222222222")
-                        .unwrap()
-                        .as_slice()
-                        .try_into()
-                        .unwrap(),
+                    decode_string(
+                        "2222222222222222222222222222222222222222222222222222222222222222"
+                    ),
                     false
                 ),
                 (
-                    hex::decode("35e794f1b42c224a8e390ce37e141a8d74aa53e151c1d1b9a03f88c65adb9e10")
-                        .unwrap()
-                        .as_slice()
-                        .try_into()
-                        .unwrap(),
+                    decode_string(
+                        "35e794f1b42c224a8e390ce37e141a8d74aa53e151c1d1b9a03f88c65adb9e10"
+                    ),
                     false
                 ),
                 (
-                    hex::decode("26fca7737f48fa702664c8b468e34c858e62f51762386bd0bddaa7050e0dd7c0")
-                        .unwrap()
-                        .as_slice()
-                        .try_into()
-                        .unwrap(),
+                    decode_string(
+                        "26fca7737f48fa702664c8b468e34c858e62f51762386bd0bddaa7050e0dd7c0"
+                    ),
                     true
                 ),
                 (
-                    hex::decode("e7e11a86a0c1d8d8624b1629cb58e39bb4d0364cb8cb33c4029662ab30336858")
-                        .unwrap()
-                        .as_slice()
-                        .try_into()
-                        .unwrap(),
+                    decode_string(
+                        "e7e11a86a0c1d8d8624b1629cb58e39bb4d0364cb8cb33c4029662ab30336858"
+                    ),
                     true
                 ),
-            ]);
+            ]
+        );
     }
 
     #[test]
@@ -418,16 +424,14 @@ mod tests {
         // proof = tree.proof(3)
         // assert verify(proof, leaf_5) == root
         let initial_value = [0x00; 32];
-        let mut tree = MerkleTree::new(5, &initial_value);
+        let mut tree = MerkleTree::new(5, &initial_value.into());
         for i in 0..tree.num_leaves() {
             let updated_value = [(i * 0x11) as u8; 32];
-            tree.set(i, &updated_value);
+            tree.set(i, &updated_value.into());
         }
-        let leaf_5 = [5 * 0x11 as u8; 32];
+        let leaf_5 = [5 * 0x11_u8; 32].into();
         let root = tree.root_hash();
         let proof = tree.create_proof(5);
         assert_eq!(&tree.verify_proof(&leaf_5, &proof), root);
-
     }
-
 }
