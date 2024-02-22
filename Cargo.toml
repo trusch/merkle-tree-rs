@@ -1,11 +1,20 @@
 [package]
-name = "take-home"
+name = "merkle-tree-rs"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[lib]
+name = "merkle_tree_rs"
+path = "src/lib.rs"
 
 [dependencies]
 digest = "0.10.7"
 hex = "0.4.3"
 sha3 = "0.10.8"
+
+[dev-dependencies]
+criterion = "0.5.1"
+
+[[bench]]
+name = "benchmark"
+harness = false
